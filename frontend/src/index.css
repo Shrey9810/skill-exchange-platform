@@ -1,0 +1,33 @@
+/* Import the Inter font family from Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+/* Include Tailwind's base, components, and utilities styles */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Apply custom base styles and UI improvements */
+@layer base {
+  body {
+    /* Set a softer, slightly warmer background color for the entire app */
+    @apply bg-[#f8f7f4] text-gray-800;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* --- NEW: SCROLL FIX --- */
+  /* Add a top margin when scrolling to any element with an ID */
+  [id] {
+    scroll-margin-top: 150px; /* Adjust this value if your sticky header height changes */
+  }
+
+  /* Improve focus styles for better accessibility and a more polished look */
+  :focus-visible {
+    @apply outline-none ring-2 ring-offset-2 ring-indigo-500 rounded-md;
+  }
+
+  /* Add a subtle transition to all elements for smoother interactions */
+  * {
+    @apply transition-colors duration-150;
+  }
+}
