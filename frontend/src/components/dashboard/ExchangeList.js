@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom'; // --- FIX: Import Link ---
 import api from '../../api';
 import useAuth from '../../hooks/useAuth';
 
@@ -45,19 +46,14 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
     }
   };
 
-  // --- MAJOR FIX: Added a check for `hasUserCompleted` ---
   const unreadMessagesCount = useMemo(() => {
     return exchanges.reduce((count, ex) => {
       const isProposer = ex.proposer._id === currentUser._id;
       const hasUserCompleted = isProposer ? ex.proposerCompleted : ex.receiverCompleted;
 
-      // A notification should only show if:
-      // 1. The exchange is active, AND
-      // 2. The current user has NOT yet marked it as complete, AND
-      // 3. There is a new message from the other user.
       if (
         ex.status === 'active' &&
-        !hasUserCompleted && // This new condition prevents the bug
+        !hasUserCompleted &&
         ex.lastMessageSender !== currentUser._id &&
         new Date(ex.lastMessageTimestamp) > new Date(isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver)
       ) {
@@ -82,7 +78,7 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
       const hasUserRated = isProposer ? ex.proposerRated : ex.receiverRated;
       
       const hasUnreadMessages = status === 'active' && 
-                                !hasUserCompleted && // Also add the check here to prevent dot from showing
+                                !hasUserCompleted &&
                                 ex.lastMessageSender !== currentUser._id && 
                                 new Date(ex.lastMessageTimestamp) > new Date(isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver);
 
@@ -94,7 +90,14 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
               <div>
                 <div className="flex items-center gap-2">
                   {hasUnreadMessages && <ChatNotificationDot />}
-                  <p className="font-bold text-gray-800">{otherUser.name}</p>
+                  {/* --- MAJOR FIX: Wrap the user's name in a Link component --- */}
+                  <Link 
+                    to={`/user/${otherUser._id}`} 
+                    className="font-bold text-gray-800 hover:text-indigo-600 transition-colors hover:underline"
+                    onClick={(e) => e.stopPropagation()} // This is crucial to prevent the chat from opening
+                  >
+                    {otherUser.name}
+                  </Link>
                 </div>
                 <p className="text-sm text-gray-600">You offer: <span className="font-medium">{isReceiver ? ex.receiverSkill.title : ex.proposerSkill.title}</span></p>
                 <p className="text-sm text-gray-600">You get: <span className="font-medium">{isReceiver ? ex.proposerSkill.title : ex.receiverSkill.title}</span></p>

@@ -19,9 +19,6 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
     }
   };
 
-  // --- MAJOR FIX: Removed `onMessagesSeen` from the dependency array ---
-  // This is the cause of the infinite loop. The effect should only re-run when the
-  // user selects a different exchange (when `exchange._id` changes).
   useEffect(() => {
     const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace('/api', '');
     const connectionOptions = { transports: ['websocket'] };
@@ -36,8 +33,6 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
     const markMessagesAsSeen = async () => {
         try {
             await api.put('/exchanges/notifications/seen', { type: 'messages', exchangeId: exchange._id });
-            // It's safe to call this function here even though it's not a dependency.
-            // We want to use the latest version of the function passed from the parent.
             if (onMessagesSeen) onMessagesSeen();
         } catch (error) {
             console.error("Failed to mark messages as seen", error);
@@ -49,7 +44,10 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
         setLoading(true);
         const res = await api.get(`/exchanges/${exchange._id}`);
         setMessages(res.data.messages);
-        markMessagesAsSeen();
+        // Only mark messages as seen if the exchange is still active
+        if (exchange.status === 'active') {
+            markMessagesAsSeen();
+        }
       } catch (error) {
         console.error("Failed to fetch messages", error);
       } finally {
@@ -59,7 +57,6 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
     fetchMessages();
 
     const handleNewMessage = (receivedMessage) => {
-      // Use functional update to avoid stale state issues
       setMessages(prev => [...prev, receivedMessage]);
     };
     socket.on('newMessage', handleNewMessage);
@@ -69,9 +66,8 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
             socketRef.current.disconnect();
         }
     };
-  }, [exchange._id]); // The dependency array now correctly only contains `exchange._id`.
+  }, [exchange._id]); // Dependency array is correct
 
-  // This effect correctly scrolls the container to the bottom whenever messages change
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
@@ -80,7 +76,6 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
     e.preventDefault();
     const socket = socketRef.current;
     if (newMessage.trim() === '' || !socket || !socket.connected) {
-        console.warn("Cannot send message, socket is not connected.");
         return;
     }
 
@@ -122,20 +117,27 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
         )}
       </div>
 
+      {/* --- MAJOR FIX: Conditionally render the input form --- */}
       <div className="p-4 border-t border-gray-200 bg-white">
-        <form onSubmit={handleSendMessage} className="flex items-center">
-          <input
-            type="text"
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            placeholder="Type your message..."
-            className="flex-grow px-4 py-2 border border-gray-300 rounded-l-full focus:outline-none focus:ring-2 focus:ring-indigo-400"
-            autoComplete="off"
-          />
-          <button type="submit" className="bg-indigo-600 text-white px-4 py-3 rounded-r-full hover:bg-indigo-700 transition-colors flex items-center justify-center">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transform rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
-          </button>
-        </form>
+        {exchange.status === 'completed' ? (
+            <div className="text-center text-gray-500 italic">
+                This exchange is completed. The chat is now closed.
+            </div>
+        ) : (
+            <form onSubmit={handleSendMessage} className="flex items-center">
+                <input
+                    type="text"
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    placeholder="Type your message..."
+                    className="flex-grow px-4 py-2 border border-gray-300 rounded-l-full focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                    autoComplete="off"
+                />
+                <button type="submit" className="bg-indigo-600 text-white px-4 py-3 rounded-r-full hover:bg-indigo-700 transition-colors flex items-center justify-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transform rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
+                </button>
+            </form>
+        )}
       </div>
     </div>
   );

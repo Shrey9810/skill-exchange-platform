@@ -40,44 +40,45 @@ app.use('/api/gemini', require('./routes/gemini'));
 
 // Socket.IO Connection Logic
 io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log(` User connected: ${socket.id}`);
 
     socket.on('joinExchangeRoom', (exchangeId) => {
         socket.join(exchangeId);
-        console.log(`User ${socket.id} joined room ${exchangeId}`);
+        console.log(` User ${socket.id} joined room ${exchangeId}`);
     });
 
     socket.on('sendMessage', async ({ exchangeId, senderId, text }) => {
         console.log(`\n Message received on backend:`);
         console.log(`  - Exchange ID: ${exchangeId}`);
-        console.log(`  - Sender ID: ${senderId}`);
-        console.log(`  - Text: "${text}"`);
-
-        if (!mongoose.Types.ObjectId.isValid(exchangeId) || !mongoose.Types.ObjectId.isValid(senderId)) {
-            console.error('Invalid Exchange ID or Sender ID.');
-            return;
-        }
 
         try {
+            // --- MAJOR FIX: Add server-side validation ---
+            // 1. Find the exchange first.
+            const exchange = await Exchange.findById(exchangeId);
+
+            // 2. Check if the exchange exists and if its status is 'active'.
+            if (!exchange || exchange.status !== 'active') {
+                console.error(` Message rejected: Exchange ${exchangeId} is not active or does not exist.`);
+                return; // Stop execution if the chat should be closed.
+            }
+
             const messagePayload = {
                 sender: senderId,
                 text: text,
                 timestamp: new Date()
             };
 
-            console.log('  - Attempting to update database...');
+            console.log('  - Exchange is active. Attempting to update database...');
             
-            const updatedExchange = await Exchange.findByIdAndUpdate(
-                exchangeId,
-                {
-                    $push: { messages: messagePayload },
-                    $set: {
-                        lastMessageTimestamp: new Date(),
-                        lastMessageSender: senderId
-                    }
-                },
-                { new: true }
-            ).populate('messages.sender', 'name avatar');
+            // 3. Proceed with saving the message only if validation passes.
+            // We can use the 'exchange' object we already fetched.
+            exchange.messages.push(messagePayload);
+            exchange.lastMessageTimestamp = new Date();
+            exchange.lastMessageSender = senderId;
+            
+            const updatedExchange = await exchange.save();
+            await updatedExchange.populate('messages.sender', 'name avatar');
+
 
             if (updatedExchange) {
                 console.log('  - Database update successful!');
@@ -85,7 +86,7 @@ io.on('connection', (socket) => {
                 console.log('  - Broadcasting "newMessage" event to room:', exchangeId);
                 io.to(exchangeId).emit('newMessage', newMessage);
             } else {
-                console.error(' FAILED: Exchange not found with ID:', exchangeId);
+                console.error(' FAILED: Could not save the updated exchange:', exchangeId);
             }
         } catch (error) {
             console.error(' CRITICAL: Error during message saving or broadcasting:', error);
