@@ -15,33 +15,23 @@ const DashboardPage = () => {
   const [exchangeToRate, setExchangeToRate] = useState(null);
   const { user, fetchNotifications } = useAuth();
 
-  const fetchExchanges = async () => {
-    try {
-      const res = await api.get('/exchanges');
-      setExchanges(res.data);
-    } catch (err) {
-      setError('Failed to fetch your exchanges. Please try again later.');
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    fetchExchanges();
-    fetchNotifications();
-  }, [fetchNotifications]);
+    const fetchAllData = async () => {
+      try {
+        setLoading(true);
+        const res = await api.get('/exchanges');
+        setExchanges(res.data);
+        fetchNotifications();
+      } catch (err) {
+        setError('Failed to fetch your exchanges. Please try again later.');
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const handleSelectExchangeAndMarkSeen = async (exchange) => {
-    setSelectedExchange(exchange);
-    // Mark messages for this exchange as seen
-    try {
-        await api.put('/exchanges/notifications/seen', { type: 'messages', exchangeId: exchange._id });
-        fetchNotifications(); // Refresh global notification count
-    } catch (error) {
-        console.error("Failed to mark messages as seen", error);
-    }
-  };
+    fetchAllData();
+  }, []); // Note: fetchNotifications is intentionally omitted to prevent loops
 
   const handleSelectExchange = (exchange) => {
     setSelectedExchange(exchange);
@@ -56,6 +46,17 @@ const DashboardPage = () => {
     }
   };
   
+  // --- MAJOR FIX: This function now re-fetches all data needed ---
+  const handleMessagesSeen = () => {
+    // 1. Refresh the global notification counts from the auth hook
+    fetchNotifications();
+    // 2. Re-fetch the entire exchanges list to update the `lastSeenBy` timestamps
+    //    This will cause the `unreadMessagesCount` in ExchangeList to recalculate correctly.
+    api.get('/exchanges')
+       .then(res => setExchanges(res.data))
+       .catch(err => console.error("Failed to refresh exchanges after seen", err));
+  };
+
   const handleOpenRatingModal = (exchange) => {
     setExchangeToRate(exchange);
     setIsRatingModalOpen(true);
@@ -86,7 +87,7 @@ const DashboardPage = () => {
             <ExchangeList 
               exchanges={exchanges} 
               currentUser={user}
-              onSelectExchange={handleSelectExchangeAndMarkSeen}
+              onSelectExchange={handleSelectExchange}
               onUpdateExchange={handleUpdateExchange}
               onRateUser={handleOpenRatingModal}
             />
@@ -98,6 +99,8 @@ const DashboardPage = () => {
                 exchange={selectedExchange} 
                 currentUser={user}
                 onClose={() => setSelectedExchange(null)}
+                // Pass the new, more complete handler to the ChatWindow
+                onMessagesSeen={handleMessagesSeen}
               />
             ) : (
               <div className="flex flex-col items-center justify-center h-full text-center text-gray-500">

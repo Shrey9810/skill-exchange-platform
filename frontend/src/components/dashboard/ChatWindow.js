@@ -3,83 +3,98 @@ import io from 'socket.io-client';
 import api from '../../api';
 import LoadingSpinner from '../common/LoadingSpinner';
 
-// Connect to the backend socket server
-const socket = io(process.env.REACT_APP_API_URL || 'http://localhost:5000');
-
-const ChatWindow = ({ exchange, currentUser, onClose }) => {
+const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
-  const messagesEndRef = useRef(null);
   
+  const messagesContainerRef = useRef(null);
+  const socketRef = useRef(null);
+
   const otherUser = exchange.proposer._id === currentUser._id ? exchange.receiver : exchange.proposer;
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
   };
 
+  // --- MAJOR FIX: Removed `onMessagesSeen` from the dependency array ---
+  // This is the cause of the infinite loop. The effect should only re-run when the
+  // user selects a different exchange (when `exchange._id` changes).
   useEffect(() => {
+    const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace('/api', '');
+    const connectionOptions = { transports: ['websocket'] };
+    
+    socketRef.current = io(socketURL, connectionOptions);
+    const socket = socketRef.current;
+    
+    socket.on('connect', () => socket.emit('joinExchangeRoom', exchange._id));
+    socket.on('connect_error', (err) => console.error('Socket connection error:', err.message));
+    socket.on('disconnect', (reason) => console.log(`Socket disconnected. Reason: ${reason}`));
+
+    const markMessagesAsSeen = async () => {
+        try {
+            await api.put('/exchanges/notifications/seen', { type: 'messages', exchangeId: exchange._id });
+            // It's safe to call this function here even though it's not a dependency.
+            // We want to use the latest version of the function passed from the parent.
+            if (onMessagesSeen) onMessagesSeen();
+        } catch (error) {
+            console.error("Failed to mark messages as seen", error);
+        }
+    };
+
     const fetchMessages = async () => {
       try {
         setLoading(true);
         const res = await api.get(`/exchanges/${exchange._id}`);
         setMessages(res.data.messages);
+        markMessagesAsSeen();
       } catch (error) {
         console.error("Failed to fetch messages", error);
       } finally {
         setLoading(false);
       }
     };
-
     fetchMessages();
 
-    socket.emit('joinExchangeRoom', exchange._id);
-
-    // This listener now handles messages from the other user
-    socket.on('newMessage', (message) => {
-      // Add the received message to the state
-      setMessages(prevMessages => [...prevMessages, message]);
-    });
+    const handleNewMessage = (receivedMessage) => {
+      // Use functional update to avoid stale state issues
+      setMessages(prev => [...prev, receivedMessage]);
+    };
+    socket.on('newMessage', handleNewMessage);
 
     return () => {
-      socket.off('newMessage');
+        if(socketRef.current) {
+            socketRef.current.disconnect();
+        }
     };
-  }, [exchange._id]);
+  }, [exchange._id]); // The dependency array now correctly only contains `exchange._id`.
 
+  // This effect correctly scrolls the container to the bottom whenever messages change
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
   const handleSendMessage = (e) => {
     e.preventDefault();
-    if (newMessage.trim() === '') return;
+    const socket = socketRef.current;
+    if (newMessage.trim() === '' || !socket || !socket.connected) {
+        console.warn("Cannot send message, socket is not connected.");
+        return;
+    }
 
     const messageData = {
       exchangeId: exchange._id,
       senderId: currentUser._id,
       text: newMessage,
     };
-
-    // --- FIX ---
-    // 1. We add the message to our own screen immediately.
-    // The backend change ensures we don't receive it back again.
-    const ownMessage = {
-        _id: Date.now(), // temporary client-side ID
-        sender: { _id: currentUser._id, name: currentUser.name, avatar: currentUser.avatar },
-        text: newMessage,
-        timestamp: new Date().toISOString()
-    };
-    setMessages(prev => [...prev, ownMessage]);
-
-    // 2. Emit the message to the server for the other user.
     socket.emit('sendMessage', messageData);
-    
     setNewMessage('');
   };
 
   return (
     <div className="flex flex-col h-full">
-      {/* Chat Header */}
       <div className="flex items-center justify-between p-3 border-b border-gray-200">
         <div className="flex items-center">
             <img src={otherUser.avatar} alt={otherUser.name} className="w-10 h-10 rounded-full mr-3" />
@@ -90,8 +105,7 @@ const ChatWindow = ({ exchange, currentUser, onClose }) => {
         </button>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-grow p-4 overflow-y-auto bg-gray-50">
+      <div ref={messagesContainerRef} className="flex-grow p-4 overflow-y-auto bg-gray-50">
         {loading ? (
           <div className="flex justify-center items-center h-full"><LoadingSpinner /></div>
         ) : (
@@ -106,10 +120,8 @@ const ChatWindow = ({ exchange, currentUser, onClose }) => {
             </div>
           ))
         )}
-        <div ref={messagesEndRef} />
       </div>
 
-      {/* Message Input Form */}
       <div className="p-4 border-t border-gray-200 bg-white">
         <form onSubmit={handleSendMessage} className="flex items-center">
           <input
@@ -121,7 +133,6 @@ const ChatWindow = ({ exchange, currentUser, onClose }) => {
             autoComplete="off"
           />
           <button type="submit" className="bg-indigo-600 text-white px-4 py-3 rounded-r-full hover:bg-indigo-700 transition-colors flex items-center justify-center">
-            {/* --- FIX --- Rotated the icon */}
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transform rotate-90" viewBox="0 0 20 20" fill="currentColor"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" /></svg>
           </button>
         </form>

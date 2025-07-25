@@ -5,6 +5,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const connectDB = require('./config/db');
 const Exchange = require('./models/Exchange');
+const mongoose = require('mongoose');
 
 // Load environment variables
 dotenv.config();
@@ -13,12 +14,13 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.IO
 const io = new Server(server, {
     cors: {
         origin: process.env.CLIENT_URL || "http://localhost:3000",
-        methods: ["GET", "POST", "PUT"]
-    }
+        methods: ["GET", "POST", "PUT"],
+        credentials: true
+    },
+    allowEIO3: true 
 });
 
 // Connect to Database
@@ -38,7 +40,7 @@ app.use('/api/gemini', require('./routes/gemini'));
 
 // Socket.IO Connection Logic
 io.on('connection', (socket) => {
-    console.log('A user connected:', socket.id);
+    console.log(`User connected: ${socket.id}`);
 
     socket.on('joinExchangeRoom', (exchangeId) => {
         socket.join(exchangeId);
@@ -46,36 +48,55 @@ io.on('connection', (socket) => {
     });
 
     socket.on('sendMessage', async ({ exchangeId, senderId, text }) => {
+        console.log(`\n Message received on backend:`);
+        console.log(`  - Exchange ID: ${exchangeId}`);
+        console.log(`  - Sender ID: ${senderId}`);
+        console.log(`  - Text: "${text}"`);
+
+        if (!mongoose.Types.ObjectId.isValid(exchangeId) || !mongoose.Types.ObjectId.isValid(senderId)) {
+            console.error('Invalid Exchange ID or Sender ID.');
+            return;
+        }
+
         try {
-            const message = { sender: senderId, text, timestamp: new Date() };
+            const messagePayload = {
+                sender: senderId,
+                text: text,
+                timestamp: new Date()
+            };
+
+            console.log('  - Attempting to update database...');
             
-            const exchange = await Exchange.findByIdAndUpdate(
+            const updatedExchange = await Exchange.findByIdAndUpdate(
                 exchangeId,
-                { 
-                    $push: { messages: message },
-                    // --- UPDATE: Also set the sender of the last message ---
-                    $set: { 
+                {
+                    $push: { messages: messagePayload },
+                    $set: {
                         lastMessageTimestamp: new Date(),
-                        lastMessageSender: senderId 
+                        lastMessageSender: senderId
                     }
                 },
                 { new: true }
             ).populate('messages.sender', 'name avatar');
 
-            if (exchange) {
-                const newMessage = exchange.messages[exchange.messages.length - 1];
-                socket.to(exchangeId).emit('newMessage', newMessage);
+            if (updatedExchange) {
+                console.log('  - Database update successful!');
+                const newMessage = updatedExchange.messages[updatedExchange.messages.length - 1];
+                console.log('  - Broadcasting "newMessage" event to room:', exchangeId);
+                io.to(exchangeId).emit('newMessage', newMessage);
+            } else {
+                console.error(' FAILED: Exchange not found with ID:', exchangeId);
             }
         } catch (error) {
-            console.error('Error saving or broadcasting message:', error);
+            console.error(' CRITICAL: Error during message saving or broadcasting:', error);
         }
     });
 
-    socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.id);
+    socket.on('disconnect', (reason) => {
+        console.log(` User disconnected: ${socket.id}. Reason: ${reason}`);
     });
 });
 
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+server.listen(PORT, () => console.log(` Server started on port ${PORT}`));

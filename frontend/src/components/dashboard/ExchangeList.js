@@ -45,15 +45,25 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
     }
   };
 
+  // --- MAJOR FIX: Added a check for `hasUserCompleted` ---
   const unreadMessagesCount = useMemo(() => {
     return exchanges.reduce((count, ex) => {
-        if (ex.status !== 'active' || ex.lastMessageSender === currentUser._id) return count;
-        const isProposer = ex.proposer._id === currentUser._id;
-        const lastSeen = isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver;
-        if (new Date(ex.lastMessageTimestamp) > new Date(lastSeen)) {
-            return count + 1;
-        }
-        return count;
+      const isProposer = ex.proposer._id === currentUser._id;
+      const hasUserCompleted = isProposer ? ex.proposerCompleted : ex.receiverCompleted;
+
+      // A notification should only show if:
+      // 1. The exchange is active, AND
+      // 2. The current user has NOT yet marked it as complete, AND
+      // 3. There is a new message from the other user.
+      if (
+        ex.status === 'active' &&
+        !hasUserCompleted && // This new condition prevents the bug
+        ex.lastMessageSender !== currentUser._id &&
+        new Date(ex.lastMessageTimestamp) > new Date(isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver)
+      ) {
+        return count + 1;
+      }
+      return count;
     }, 0);
   }, [exchanges, currentUser]);
 
@@ -72,6 +82,7 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
       const hasUserRated = isProposer ? ex.proposerRated : ex.receiverRated;
       
       const hasUnreadMessages = status === 'active' && 
+                                !hasUserCompleted && // Also add the check here to prevent dot from showing
                                 ex.lastMessageSender !== currentUser._id && 
                                 new Date(ex.lastMessageTimestamp) > new Date(isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver);
 
@@ -82,7 +93,6 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
               <img src={otherUser.avatar} alt={otherUser.name} className="w-12 h-12 rounded-full mr-4" />
               <div>
                 <div className="flex items-center gap-2">
-                  {/* --- FIX: Moved notification dot here --- */}
                   {hasUnreadMessages && <ChatNotificationDot />}
                   <p className="font-bold text-gray-800">{otherUser.name}</p>
                 </div>
@@ -107,8 +117,8 @@ const ExchangeList = ({ exchanges, currentUser, onSelectExchange, onUpdateExchan
               {status === 'completed' && !hasUserRated && (
                  <button onClick={(e) => { e.stopPropagation(); onRateUser(ex); }} className="px-3 py-1 text-sm font-semibold text-white bg-yellow-500 rounded-md hover:bg-yellow-600">Rate {otherUser.name}</button>
               )}
-               {status === 'completed' && hasUserRated && (
-                 <span className="text-sm text-green-600 italic px-3 py-1">✓ Rated</span>
+                {status === 'completed' && hasUserRated && (
+                   <span className="text-sm text-green-600 italic px-3 py-1">✓ Rated</span>
               )}
             </div>
           </div>

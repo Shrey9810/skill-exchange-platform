@@ -131,31 +131,29 @@ exports.completeExchange = async (req, res) => {
     }
 };
 
+// --- MAJOR FIX: Rewritten for efficiency and accuracy ---
 // Get notification counts for the current user
 exports.getNotificationCounts = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = new mongoose.Types.ObjectId(req.user.id);
 
+        // Count pending proposals where the user is the receiver
         const newProposalsCount = await Exchange.countDocuments({
             receiver: userId,
             status: 'pending',
             seenByReceiver: false
         });
 
-        // Find active exchanges where the last message was NOT from the current user
-        const activeExchanges = await Exchange.find({
+        // Count active exchanges with unread messages using a single, efficient query
+        const unreadMessagesCount = await Exchange.countDocuments({
             status: 'active',
-            $or: [{ proposer: userId }, { receiver: userId }],
-            lastMessageSender: { $ne: userId }
-        });
-
-        let unreadMessagesCount = 0;
-        activeExchanges.forEach(ex => {
-            const isProposer = ex.proposer.toString() === userId;
-            const lastSeen = isProposer ? ex.lastSeenByProposer : ex.lastSeenByReceiver;
-            if (new Date(ex.lastMessageTimestamp) > new Date(lastSeen)) {
-                unreadMessagesCount++;
-            }
+            lastMessageSender: { $ne: userId }, // The other user sent the last message
+            $or: [
+                // Case 1: The current user is the PROPOSER and the last message is newer than their last seen time
+                { proposer: userId, $expr: { $gt: ["$lastMessageTimestamp", "$lastSeenByProposer"] } },
+                // Case 2: The current user is the RECEIVER and the last message is newer than their last seen time
+                { receiver: userId, $expr: { $gt: ["$lastMessageTimestamp", "$lastSeenByReceiver"] } }
+            ]
         });
 
         res.json({ newProposalsCount, unreadMessagesCount });
@@ -164,6 +162,7 @@ exports.getNotificationCounts = async (req, res) => {
         res.status(500).send('Server Error');
     }
 };
+
 
 // Mark notifications as seen
 exports.markNotificationsAsSeen = async (req, res) => {
@@ -182,6 +181,8 @@ exports.markNotificationsAsSeen = async (req, res) => {
 
             const isProposer = exchange.proposer.toString() === userId;
             const updateField = isProposer ? 'lastSeenByProposer' : 'lastSeenByReceiver';
+            
+            // Use the current time to mark as seen
             await Exchange.updateOne({ _id: exchangeId }, { $set: { [updateField]: new Date() } });
         }
         res.json({ msg: 'Notifications marked as seen' });
