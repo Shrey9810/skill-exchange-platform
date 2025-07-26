@@ -80,10 +80,8 @@ io.on('connection', (socket) => {
             if (updatedExchange) {
                 const newMessage = updatedExchange.messages[updatedExchange.messages.length - 1];
                 
-                // *** THE FIX IS HERE ***
-                // The payload now includes the exchangeId so the client can correctly identify which chat window to update.
                 const payload = {
-                    ...newMessage.toObject(), // Use .toObject() to get a plain JS object
+                    ...newMessage.toObject(),
                     exchangeId: exchangeId
                 };
 
@@ -123,19 +121,27 @@ io.on('connection', (socket) => {
         }
     });
     
-    socket.on('webrtc-offer', ({ offer, to }) => {
+    // **BUG FIX**: Expect `from` in the payload and forward the whole object.
+    socket.on('webrtc-offer', ({ offer, to, from }) => {
         const toSocketId = userSockets[to._id];
-        io.to(toSocketId).emit('webrtc-offer', offer);
+        if (toSocketId) {
+            // Forward the offer and who it's from so the callee knows.
+            io.to(toSocketId).emit('webrtc-offer', { offer, from });
+        }
     });
 
     socket.on('webrtc-answer', ({ answer, to }) => {
         const toSocketId = userSockets[to._id];
-        io.to(toSocketId).emit('webrtc-answer', answer);
+        if (toSocketId) {
+            io.to(toSocketId).emit('webrtc-answer', answer);
+        }
     });
 
     socket.on('webrtc-ice-candidate', ({ candidate, to }) => {
         const toSocketId = userSockets[to._id];
-        io.to(toSocketId).emit('webrtc-ice-candidate', candidate);
+        if (toSocketId) {
+            io.to(toSocketId).emit('webrtc-ice-candidate', candidate);
+        }
     });
 
     socket.on('end-call', ({ to }) => {

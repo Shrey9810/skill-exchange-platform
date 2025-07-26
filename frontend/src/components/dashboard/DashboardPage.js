@@ -29,66 +29,72 @@ const DashboardPage = () => {
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isCamOff, setIsCamOff] = useState(false);
 
+  // --- Refs ---
   const socketRef = useRef(null);
   const peerConnectionRef = useRef(null);
   const screenTrackRef = useRef(null);
+  const iceCandidateBufferRef = useRef([]);
 
   // --- WebRTC Cleanup ---
   const cleanupCall = useCallback(() => {
     console.log("Cleaning up call resources...");
     if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
+      localStream.getTracks().forEach(track => track.stop());
     }
     if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
     }
+    iceCandidateBufferRef.current = [];
     setLocalStream(null);
     setRemoteStream(null);
     setCallState({ incomingCall: null, isCallActive: false, callPartner: null });
     setIsMicMuted(false);
     setIsCamOff(false);
     if (screenTrackRef.current) {
-        screenTrackRef.current.stop();
-        screenTrackRef.current = null;
+      screenTrackRef.current.stop();
+      screenTrackRef.current = null;
     }
   }, [localStream]);
 
-
   // --- WebRTC Logic ---
   const createPeerConnection = useCallback((partner) => {
+    if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+    }
+    
     const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
 
     pc.onicecandidate = (event) => {
-        if (event.candidate && socketRef.current) {
-            socketRef.current.emit('webrtc-ice-candidate', {
-                candidate: event.candidate,
-                to: partner,
-            });
-        }
+      if (event.candidate && socketRef.current) {
+        socketRef.current.emit('webrtc-ice-candidate', {
+          candidate: event.candidate,
+          to: partner,
+        });
+      }
     };
 
     pc.ontrack = (event) => {
-        setRemoteStream(event.streams[0]);
-    };
-    
-    pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
-            console.log("ICE connection state changed to:", pc.iceConnectionState);
-            cleanupCall();
-        }
+      setRemoteStream(event.streams[0]);
     };
 
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
+        console.log("ICE connection state changed, cleaning up call:", pc.iceConnectionState);
+        cleanupCall();
+      }
+    };
+
+    peerConnectionRef.current = pc;
     return pc;
   }, [cleanupCall]);
 
-  // --- Socket.IO Connection and Listener Setup ---
+  // Establish socket connection once
   useEffect(() => {
     if (!user) return;
 
-    // Establish socket connection
     const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace('/api', '');
     const socket = io(socketURL, { transports: ['websocket'] });
     socketRef.current = socket;
@@ -97,77 +103,118 @@ const DashboardPage = () => {
       console.log('Socket connected:', socket.id);
       socket.emit('registerUser', user._id);
     });
+    
+    return () => {
+      console.log('Disconnecting socket...');
+      socket.disconnect();
+    };
+  }, [user]);
 
-    // Define handlers for socket events
+  // Setup WebRTC event listeners
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
     const handleIncomingCall = ({ from, exchangeId }) => {
-        if (callState.isCallActive || callState.incomingCall) return;
-        setCallState(prev => ({ ...prev, incomingCall: { from, exchangeId } }));
+      setCallState(prev => {
+        if (prev.isCallActive || prev.incomingCall) return prev;
+        return { ...prev, incomingCall: { from, exchangeId } };
+      });
     };
 
     const handleCallAccepted = async ({ from }) => {
-        console.log("Call accepted by", from.name);
-        peerConnectionRef.current = createPeerConnection(from);
-        localStream.getTracks().forEach(track => peerConnectionRef.current.addTrack(track, localStream));
-        
-        const offer = await peerConnectionRef.current.createOffer();
-        await peerConnectionRef.current.setLocalDescription(offer);
+      console.log("Call accepted by", from.name);
+      setCallState(prev => ({...prev, callPartner: from}));
+      createPeerConnection(from);
+      
+      localStream?.getTracks().forEach(track => {
+        peerConnectionRef.current.addTrack(track, localStream);
+      });
+      
+      const offer = await peerConnectionRef.current.createOffer();
+      await peerConnectionRef.current.setLocalDescription(offer);
 
-        socket.emit('webrtc-offer', { offer, to: from });
+      // **BUG FIX**: Send the caller's user object (`user`) as `from`
+      // so the callee knows who the offer is from.
+      socket.emit('webrtc-offer', { offer, to: from, from: user });
     };
 
-    const handleWebRTCOffer = async (offer) => {
-        if (!peerConnectionRef.current || !callState.callPartner) return;
+    const handleWebRTCOffer = async (offer, from) => {
+        console.log("Received WebRTC Offer");
+        if (!offer || !from) {
+            console.error("Received invalid WebRTC offer payload.");
+            return;
+        }
+        setCallState(prev => ({...prev, callPartner: from}));
+        createPeerConnection(from);
+
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(offer));
         
-        localStream.getTracks().forEach(track => peerConnectionRef.current.addTrack(track, localStream));
+        localStream?.getTracks().forEach(track => {
+            peerConnectionRef.current.addTrack(track, localStream);
+        });
 
         const answer = await peerConnectionRef.current.createAnswer();
         await peerConnectionRef.current.setLocalDescription(answer);
 
-        socket.emit('webrtc-answer', { answer, to: callState.callPartner });
+        iceCandidateBufferRef.current.forEach(candidate => {
+            peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+        });
+        iceCandidateBufferRef.current = [];
+
+        socket.emit('webrtc-answer', { answer, to: from });
     };
 
     const handleWebRTCAnswer = async (answer) => {
-        if (!peerConnectionRef.current) return;
-        await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+      console.log("Received WebRTC Answer");
+      if (!peerConnectionRef.current) return;
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+
+      iceCandidateBufferRef.current.forEach(candidate => {
+          peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      });
+      iceCandidateBufferRef.current = [];
     };
 
     const handleWebRTCIceCandidate = (candidate) => {
-        if (!peerConnectionRef.current) return;
+      if (!peerConnectionRef.current) return;
+
+      if (peerConnectionRef.current.remoteDescription) {
         peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        console.log("Buffering ICE candidate.");
+        iceCandidateBufferRef.current.push(candidate);
+      }
     };
 
     const handleCallDeclined = () => {
-        alert("Call declined.");
-        cleanupCall();
+      alert("Call declined.");
+      cleanupCall();
     };
 
     const handleCallEnded = () => {
-        console.log("Remote user ended the call.");
-        cleanupCall();
+      console.log("Remote user ended the call.");
+      cleanupCall();
     };
 
-    // Register listeners
     socket.on('incoming-video-call', handleIncomingCall);
     socket.on('call-accepted', handleCallAccepted);
-    socket.on('webrtc-offer', handleWebRTCOffer);
+    socket.on('webrtc-offer', ({ offer, from }) => handleWebRTCOffer(offer, from));
     socket.on('webrtc-answer', handleWebRTCAnswer);
     socket.on('webrtc-ice-candidate', handleWebRTCIceCandidate);
     socket.on('call-declined', handleCallDeclined);
     socket.on('call-ended', handleCallEnded);
 
-    // Disconnect and clean up listeners on unmount
     return () => {
-        socket.off('incoming-video-call', handleIncomingCall);
-        socket.off('call-accepted', handleCallAccepted);
-        socket.off('webrtc-offer', handleWebRTCOffer);
-        socket.off('webrtc-answer', handleWebRTCAnswer);
-        socket.off('webrtc-ice-candidate', handleWebRTCIceCandidate);
-        socket.off('call-declined', handleCallDeclined);
-        socket.off('call-ended', handleCallEnded);
-        socket.disconnect();
+      socket.off('incoming-video-call', handleIncomingCall);
+      socket.off('call-accepted', handleCallAccepted);
+      socket.off('webrtc-offer');
+      socket.off('webrtc-answer', handleWebRTCAnswer);
+      socket.off('webrtc-ice-candidate', handleWebRTCIceCandidate);
+      socket.off('call-declined', handleCallDeclined);
+      socket.off('call-ended', handleCallEnded);
     };
-  }, [user, callState.isCallActive, callState.incomingCall, callState.callPartner, localStream, cleanupCall, createPeerConnection]);
+  }, [user, cleanupCall, createPeerConnection, localStream]);
 
 
   // --- Call Handling Functions ---
@@ -175,18 +222,18 @@ const DashboardPage = () => {
     if (!socketRef.current) return;
 
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setLocalStream(stream);
-        setCallState({ incomingCall: null, isCallActive: true, callPartner: partner });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setLocalStream(stream);
+      setCallState({ incomingCall: null, isCallActive: true, callPartner: partner });
 
-        socketRef.current.emit('video-call-request', {
-            from: { _id: user._id, name: user.name, avatar: user.avatar },
-            to: partner,
-            exchangeId: selectedExchange._id,
-        });
+      socketRef.current.emit('video-call-request', {
+        from: { _id: user._id, name: user.name, avatar: user.avatar },
+        to: partner,
+        exchangeId: selectedExchange._id,
+      });
     } catch (err) {
-        console.error("Failed to get media devices.", err);
-        alert("Could not start video call. Please ensure you have given camera and microphone permissions.");
+      console.error("Failed to get media devices.", err);
+      alert("Could not start video call. Please ensure you have given camera and microphone permissions.");
     }
   };
 
@@ -194,22 +241,20 @@ const DashboardPage = () => {
     if (!callState.incomingCall) return;
 
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setLocalStream(stream);
-        
-        const caller = callState.incomingCall.from;
-        setCallState({ incomingCall: null, isCallActive: true, callPartner: caller });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setLocalStream(stream);
+      
+      const caller = callState.incomingCall.from;
+      setCallState({ incomingCall: null, isCallActive: true, callPartner: caller });
 
-        peerConnectionRef.current = createPeerConnection(caller);
-
-        socketRef.current.emit('video-call-accepted', {
-            from: { _id: user._id, name: user.name, avatar: user.avatar },
-            to: caller,
-        });
+      socketRef.current.emit('video-call-accepted', {
+        from: { _id: user._id, name: user.name, avatar: user.avatar },
+        to: caller,
+      });
     } catch (err) {
-        console.error("Failed to get media devices on accept.", err);
-        alert("Could not start video call. Please ensure you have given camera and microphone permissions.");
-        declineCall();
+      console.error("Failed to get media devices on accept.", err);
+      alert("Could not start video call. Please ensure you have given camera and microphone permissions.");
+      declineCall();
     }
   };
 
@@ -221,27 +266,27 @@ const DashboardPage = () => {
 
   const endCall = () => {
     if (socketRef.current && callState.callPartner) {
-        socketRef.current.emit('end-call', { to: callState.callPartner });
+      socketRef.current.emit('end-call', { to: callState.callPartner });
     }
     cleanupCall();
   };
-  
+
   // --- Media Controls ---
   const toggleMic = () => {
     if (localStream) {
-        localStream.getAudioTracks().forEach(track => {
-            track.enabled = !track.enabled;
-        });
-        setIsMicMuted(prev => !prev);
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsMicMuted(prev => !prev);
     }
   };
 
   const toggleCam = () => {
     if (localStream) {
-        localStream.getVideoTracks().forEach(track => {
-            track.enabled = !track.enabled;
-        });
-        setIsCamOff(prev => !prev);
+      localStream.getVideoTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsCamOff(prev => !prev);
     }
   };
 
@@ -252,35 +297,34 @@ const DashboardPage = () => {
     const sender = peerConnectionRef.current.getSenders().find(s => s.track.kind === 'video');
 
     if (isSharing) { // Start sharing
-        try {
-            const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-            const screenTrack = screenStream.getVideoTracks()[0];
-            screenTrackRef.current = screenTrack;
-            sender.replaceTrack(screenTrack);
-            
-            screenTrack.onended = () => {
-                sender.replaceTrack(videoTrack);
-                setIsCamOff(false);
-                screenTrackRef.current = null;
-            };
-            return true;
-        } catch (err) {
-            console.error("Screen share failed:", err);
-            return false;
-        }
-    } else { // Stop sharing
-        if (screenTrackRef.current) {
-            screenTrackRef.current.stop();
-            screenTrackRef.current = null;
-        }
-        sender.replaceTrack(videoTrack);
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenTrack = screenStream.getVideoTracks()[0];
+        screenTrackRef.current = screenTrack;
+        sender.replaceTrack(screenTrack);
+        
+        screenTrack.onended = () => {
+          sender.replaceTrack(videoTrack);
+          setIsCamOff(false);
+          screenTrackRef.current = null;
+        };
+        return true;
+      } catch (err) {
+        console.error("Screen share failed:", err);
         return false;
+      }
+    } else { // Stop sharing
+      if (screenTrackRef.current) {
+        screenTrackRef.current.stop();
+        screenTrackRef.current = null;
+      }
+      sender.replaceTrack(videoTrack);
+      return false;
     }
   };
 
 
   // --- Data Fetching and Regular App Logic ---
-  // *** FIX #1: The dependency array is now just [user]. This stops the main page refresh loop. ***
   useEffect(() => {
     const fetchAllData = async () => {
       try {
@@ -296,8 +340,9 @@ const DashboardPage = () => {
       }
     };
     if (user) {
-        fetchAllData();
+      fetchAllData();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const handleSelectExchange = (exchange) => setSelectedExchange(exchange);
@@ -305,16 +350,15 @@ const DashboardPage = () => {
   const handleUpdateExchange = (updatedExchange) => {
     setExchanges(prev => prev.map(ex => ex._id === updatedExchange._id ? updatedExchange : ex));
     if (selectedExchange && selectedExchange._id === updatedExchange._id) {
-        setSelectedExchange(updatedExchange);
+      setSelectedExchange(updatedExchange);
     }
   };
-  
-  // *** FIX #2: Stabilize `handleMessagesSeen` by removing the unstable `fetchNotifications` from its dependencies. ***
+
   const handleMessagesSeen = useCallback(() => {
     fetchNotifications();
     api.get('/exchanges')
-       .then(res => setExchanges(res.data))
-       .catch(err => console.error("Failed to refresh exchanges", err));
+      .then(res => setExchanges(res.data))
+      .catch(err => console.error("Failed to refresh exchanges", err));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -338,8 +382,8 @@ const DashboardPage = () => {
         <h1 className="text-3xl md:text-4xl font-bold text-gray-800 mb-6">Your Dashboard</h1>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2">
-            <ExchangeList 
-              exchanges={exchanges} 
+            <ExchangeList
+              exchanges={exchanges}
               currentUser={user}
               onSelectExchange={handleSelectExchange}
               onUpdateExchange={handleUpdateExchange}
@@ -348,9 +392,9 @@ const DashboardPage = () => {
           </div>
           <div className="bg-white rounded-lg shadow-md p-0 lg:p-0 h-[70vh] flex flex-col overflow-hidden">
             {selectedExchange ? (
-              <ChatWindow 
+              <ChatWindow
                 key={selectedExchange._id}
-                exchange={selectedExchange} 
+                exchange={selectedExchange}
                 currentUser={user}
                 onClose={() => setSelectedExchange(null)}
                 onMessagesSeen={handleMessagesSeen}
@@ -372,22 +416,22 @@ const DashboardPage = () => {
       )}
       {/* --- Video Call Modals --- */}
       {callState.incomingCall && (
-        <IncomingCallModal 
-            caller={callState.incomingCall.from}
-            onAccept={acceptCall}
-            onDecline={declineCall}
+        <IncomingCallModal
+          caller={callState.incomingCall.from}
+          onAccept={acceptCall}
+          onDecline={declineCall}
         />
       )}
       {callState.isCallActive && (
-        <VideoCallUI 
-            localStream={localStream}
-            remoteStream={remoteStream}
-            onEndCall={endCall}
-            onToggleMic={toggleMic}
-            onToggleCam={toggleCam}
-            onShareScreen={toggleScreenShare}
-            isMicMuted={isMicMuted}
-            isCamOff={isCamOff}
+        <VideoCallUI
+          localStream={localStream}
+          remoteStream={remoteStream}
+          onEndCall={endCall}
+          onToggleMic={toggleMic}
+          onToggleCam={toggleCam}
+          onShareScreen={toggleScreenShare}
+          isMicMuted={isMicMuted}
+          isCamOff={isCamOff}
         />
       )}
     </>
