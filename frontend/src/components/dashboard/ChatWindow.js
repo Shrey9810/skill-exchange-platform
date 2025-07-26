@@ -1,16 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import io from 'socket.io-client';
 import api from '../../api';
 import LoadingSpinner from '../common/LoadingSpinner';
 
-const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
+const VideoCallIcon = () => <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>;
+
+const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen, onInitiateCall, socket }) => {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(true);
   
   const messagesContainerRef = useRef(null);
-  const socketRef = useRef(null);
-
   const otherUser = exchange.proposer._id === currentUser._id ? exchange.receiver : exchange.proposer;
 
   const scrollToBottom = () => {
@@ -19,17 +18,8 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
     }
   };
 
+  // Effect for fetching initial messages and marking them as seen
   useEffect(() => {
-    const socketURL = (process.env.REACT_APP_API_URL || 'http://localhost:5000').replace('/api', '');
-    const connectionOptions = { transports: ['websocket'] };
-    
-    socketRef.current = io(socketURL, connectionOptions);
-    const socket = socketRef.current;
-    
-    socket.on('connect', () => socket.emit('joinExchangeRoom', exchange._id));
-    socket.on('connect_error', (err) => console.error('Socket connection error:', err.message));
-    socket.on('disconnect', (reason) => console.log(`Socket disconnected. Reason: ${reason}`));
-
     const markMessagesAsSeen = async () => {
         try {
             await api.put('/exchanges/notifications/seen', { type: 'messages', exchangeId: exchange._id });
@@ -44,7 +34,6 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
         setLoading(true);
         const res = await api.get(`/exchanges/${exchange._id}`);
         setMessages(res.data.messages);
-        // Only mark messages as seen if the exchange is still active
         if (exchange.status === 'active') {
             markMessagesAsSeen();
         }
@@ -54,27 +43,42 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
         setLoading(false);
       }
     };
+    
     fetchMessages();
+  }, [exchange._id, exchange.status, onMessagesSeen]);
 
+  // *** THE DEFINITIVE FIX IS HERE ***
+  // This useEffect now handles joining the room and listening for messages.
+  useEffect(() => {
+    if (!socket) return;
+
+    // 1. Join the specific chat room
+    socket.emit('joinExchangeRoom', exchange._id);
+
+    // 2. Set up the listener for new messages
     const handleNewMessage = (receivedMessage) => {
-      setMessages(prev => [...prev, receivedMessage]);
+      // If the incoming message from the server belongs to this chat, add it to the state.
+      // This works for everyone in the room (sender and receiver).
+      if (receivedMessage.exchangeId === exchange._id) {
+        setMessages(prev => [...prev, receivedMessage]);
+      }
     };
+
     socket.on('newMessage', handleNewMessage);
 
+    // 3. Clean up the listener when the component unmounts or the chat changes
     return () => {
-        if(socketRef.current) {
-            socketRef.current.disconnect();
-        }
+      socket.off('newMessage', handleNewMessage);
     };
-  }, [exchange._id]); // Dependency array is correct
+  }, [socket, exchange._id]); // Dependencies are stable and correct
 
+  // Effect for scrolling to the bottom when new messages arrive
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
   const handleSendMessage = (e) => {
     e.preventDefault();
-    const socket = socketRef.current;
     if (newMessage.trim() === '' || !socket || !socket.connected) {
         return;
     }
@@ -84,6 +88,9 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
       senderId: currentUser._id,
       text: newMessage,
     };
+    
+    // Send the message and wait for the server to broadcast it back to everyone,
+    // including the sender. This ensures the UI is always in sync with the database.
     socket.emit('sendMessage', messageData);
     setNewMessage('');
   };
@@ -95,9 +102,16 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
             <img src={otherUser.avatar} alt={otherUser.name} className="w-10 h-10 rounded-full mr-3" />
             <span className="font-bold text-gray-800">{otherUser.name}</span>
         </div>
-        <button onClick={onClose} className="text-gray-500 hover:text-gray-800">
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-        </button>
+        <div className="flex items-center space-x-4">
+            {exchange.status === 'active' && (
+                 <button onClick={() => onInitiateCall(otherUser)} className="text-gray-500 hover:text-indigo-600 transition-colors" title="Start Video Call">
+                    <VideoCallIcon />
+                </button>
+            )}
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-800">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+        </div>
       </div>
 
       <div ref={messagesContainerRef} className="flex-grow p-4 overflow-y-auto bg-gray-50">
@@ -117,11 +131,10 @@ const ChatWindow = ({ exchange, currentUser, onClose, onMessagesSeen }) => {
         )}
       </div>
 
-      {/* --- MAJOR FIX: Conditionally render the input form --- */}
       <div className="p-4 border-t border-gray-200 bg-white">
-        {exchange.status === 'completed' ? (
+        {exchange.status !== 'active' ? (
             <div className="text-center text-gray-500 italic">
-                This exchange is completed. The chat is now closed.
+                This chat is now closed.
             </div>
         ) : (
             <form onSubmit={handleSendMessage} className="flex items-center">
