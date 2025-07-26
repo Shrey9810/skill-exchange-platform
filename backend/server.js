@@ -14,20 +14,42 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
-const io = new Server(server, {
-    cors: {
-        origin: process.env.CLIENT_URL || "http://localhost:3000",
-        methods: ["GET", "POST", "PUT"],
-        credentials: true
+// --- CORS Configuration for Production ---
+// Define the list of URLs that are allowed to connect to your backend.
+const allowedOrigins = [
+    'http://localhost:3000',    // For local development
+    process.env.CLIENT_URL      // For your deployed Vercel frontend
+];
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Allow requests with no origin (like mobile apps or Postman)
+        if (!origin) return callback(null, true);
+        
+        // If the origin of the request is in our allowed list, allow it.
+        if (allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            // Otherwise, block the request.
+            callback(new Error('Not allowed by CORS'));
+        }
     },
-    allowEIO3: true 
+    credentials: true
+};
+
+// Use the CORS options for all incoming Express requests
+app.use(cors(corsOptions));
+
+// Initialize Socket.IO with the same CORS options
+const io = new Server(server, {
+    cors: corsOptions,
+    allowEIO3: true
 });
 
 // Connect to Database
 connectDB();
 
-// Middleware
-app.use(cors());
+// Middleware to parse JSON bodies
 app.use(express.json());
 
 // API Routes
@@ -121,11 +143,9 @@ io.on('connection', (socket) => {
         }
     });
     
-    // **BUG FIX**: Expect `from` in the payload and forward the whole object.
     socket.on('webrtc-offer', ({ offer, to, from }) => {
         const toSocketId = userSockets[to._id];
         if (toSocketId) {
-            // Forward the offer and who it's from so the callee knows.
             io.to(toSocketId).emit('webrtc-offer', { offer, from });
         }
     });
